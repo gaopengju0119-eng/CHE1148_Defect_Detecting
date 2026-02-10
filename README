@@ -1,0 +1,22 @@
+# CHE1148 Textile Defect Detecting
+
+Team project repo for textile surface defect detection (proxy for SEM/TEM surface anomalies).
+
+## Project Structure
+CHE1148_Defect_Detecting/
+  main.py
+  environment.yml
+  .gitignore
+  data/ # ignored by git (local only)
+    raw/
+      textile/ # put downloaded .h5 here
+    processed/ # generated folders/images go here
+
+## Setup (Conda)
+1) Create environment:
+```bash
+conda env create -f environment.yml
+conda activate CHE1148_Defect_Detecting
+2）(If needed) install basic deps:
+conda install -y numpy h5py pillow matplotlib scikit-learn tqdm
+
