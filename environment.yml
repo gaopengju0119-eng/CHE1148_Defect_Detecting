@@ -9,3 +9,5 @@ dependencies:
   - h5py
   - numpy
   - tqdm
+  - pandas
+  - torch

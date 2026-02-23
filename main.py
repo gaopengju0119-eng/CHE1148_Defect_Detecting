@@ -7,10 +7,19 @@
 # **Outputs:** `full64.h5` and `full64.csv` in the `data/processed` directory.
 
 # %% Data Preprocessing Implementation
-import hashlib
 from pathlib import Path
+
 import h5py
+import numpy as np
 import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+import h5py
+import hashlib
+import numpy as np
+import pandas as pd
+import torch
 
 # Path configuration using pathlib for cross-platform compatibility
 ROOT = Path(__file__).resolve().parent
@@ -171,10 +180,7 @@ if __name__ == "__main__":
 # **Purpose:** Check if duplicates cross the Train/Test boundary (Data Leakage).
 
 # %% Implementation
-import h5py
 import hashlib
-import pandas as pd
-import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
@@ -258,3 +264,274 @@ if __name__ == "__main__":
     analyze_duplicates()
 
 # %% End of Duplicate Images Origin Analysis
+
+# %% [markdown]
+# ### Official Split Implementation
+# **Task:** Sub-split author's 'train64' into Train/Val, and keep 'test64' as final Test.
+# **Integrity:** Grouping by 'index' is preserved to prevent rotation leakage.
+
+# %% Splitting Implementation
+from sklearn.model_selection import train_test_split
+from pathlib import Path
+
+# Path configuration (Point to your RAW folder)
+ROOT = Path(__file__).resolve().parent
+RAW = ROOT / "data" / "raw" / "textile"
+PROCESSED = ROOT / "data" / "processed"
+PROCESSED.mkdir(parents=True, exist_ok=True)
+
+
+def create_official_tri_split():
+    # 1. Load Author's Original CSVs
+    train_df_full = pd.read_csv(RAW / "train64.csv")
+    test_df_full = pd.read_csv(RAW / "test64.csv")
+
+    # 2. Sub-split the Training set to create a Validation set
+    # We use 'index' to ensure all 8 rotations of an image stay together
+    unique_train_indices = train_df_full['index'].unique()
+
+    # Stratify based on the first occurrence of each image's type
+    stratify_labels = train_df_full.drop_duplicates('index')['indication_type']
+
+    train_indices, val_indices = train_test_split(
+        unique_train_indices,
+        test_size=0.10,  # 10% for validation
+        random_state=42,
+        stratify=stratify_labels
+    )
+
+    # 3. Map indices back to full records
+    df_train = train_df_full[train_df_full['index'].isin(train_indices)]
+    df_val = train_df_full[train_df_full['index'].isin(val_indices)]
+    df_test = test_df_full  # Test remains untouched
+
+    # 4. Save metadata for the training pipeline
+    df_train.to_csv(PROCESSED / "train_split.csv", index=False)
+    df_val.to_csv(PROCESSED / "val_split.csv", index=False)
+    df_test.to_csv(PROCESSED / "test_split.csv", index=False)
+
+    print(f"Successfully split based on author's files:")
+    print(f" - Train: {len(df_train)} samples (from train64.h5)")
+    print(f" - Val:   {len(df_val)} samples (from train64.h5)")
+    print(f" - Test:  {len(df_test)} samples (from test64.h5)")
+
+
+if __name__ == "__main__":
+    create_official_tri_split()
+# %% End of splitting
+
+
+# %% [markdown]
+# ### Custom PyTorch Dataset Implementation
+# **Task:** Develop a memory-efficient data loader to fetch textile images from H5 files using CSV metadata.
+# **Integrity:** Normalizes pixel ranges and ensures dimension alignment (CHW) for PyTorch model compatibility.
+
+# %% Dataset Implementation
+
+class TextileDataset(Dataset):
+    """
+    Standard PyTorch Dataset class for textile defect detection.
+    Connects the processed CSV metadata with the binary H5 image storage.
+    """
+
+    def __init__(self, csv_path, h5_path, transform=None):
+        # Load the split metadata (train_split.csv, val_split.csv, or test_split.csv)
+        self.df = pd.read_csv(csv_path)
+        self.h5_path = h5_path
+        self.transform = transform
+
+        # Label Encoding: Map categorical strings to numerical integers
+        # Sort labels to ensure consistent mapping across different runs
+        self.label_map = {
+            'color': 0,
+            'cut': 1,
+            'good': 2,
+            'hole': 3,
+            'metal_contamination': 4,
+            'thread': 5
+        }
+
+    def __len__(self):
+        # Return the total number of samples in the current split
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        """
+        Retrieves a single sample from the dataset.
+        Handles on-the-fly loading and preprocessing to save RAM.
+        """
+        # 1. Retrieve metadata for the current index
+        row = self.df.iloc[idx]
+        global_idx = row['index']  # The original physical index in the H5 file
+        label_str = row['indication_type']
+
+        # 2. Access the image from the H5 file
+        # We open the file in 'r' mode within the getter to support multi-process loading
+        with h5py.File(self.h5_path, 'r') as f:
+            # Expected raw shape: (64, 64, 1)
+            img = f['images'][global_idx]
+
+        # 3. Preprocessing Step 1: Normalization/Scaling
+        # Convert uint8 [0, 255] to float32 [0.0, 1.0] for stable gradient descent
+        img = img.astype(np.float32) / 255.0
+
+        # 4. Preprocessing Step 2: Dimension Permutation
+        # Convert (Height, Width, Channel) to (Channel, Height, Width)
+        # This is mandatory for PyTorch convolutional layers
+        img = np.transpose(img, (2, 0, 1))
+
+        # 5. Preprocessing Step 3: Label Mapping
+        # Convert the string label (e.g., 'hole') to its integer ID
+        label = self.label_map[label_str]
+
+        # 6. Preprocessing Step 4: Tensorization
+        # Final conversion to PyTorch tensors for computation
+        image_tensor = torch.from_numpy(img)
+        label_tensor = torch.tensor(label, dtype=torch.long)
+
+        return image_tensor, label_tensor
+
+# %% [markdown]
+# ### Dataset Instantiation Example
+# **Note:** Replace the paths below with your actual local file locations.
+# The 'train64.h5' and 'test64.h5' should be the original files provided by the author.
+# %% [markdown]
+# ### Baseline CNN Model Architecture
+# **Task:** Define a standard Convolutional Neural Network (CNN) for 6-class grayscale image classification.
+# **Design:** Uses 3 convolutional blocks followed by fully connected layers to extract and classify defect features.
+
+# %% Model Implementation
+
+class TextileBaselineCNN(nn.Module):
+    """
+    A standard CNN baseline for 64x64 grayscale images.
+    Consists of three convolutional blocks and a classification head.
+    """
+
+    def __init__(self, num_classes=6):
+        super(TextileBaselineCNN, self).__init__()
+
+        # Block 1: Input (1, 64, 64) -> Output (32, 32, 32)
+        # Extracts low-level features like edges and basic textures
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Block 2: Input (32, 32, 32) -> Output (64, 16, 16)
+        # Extracts mid-level geometric patterns (e.g., holes, threads)
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Block 3: Input (64, 16, 16) -> Output (128, 8, 8)
+        # Extracts high-level semantic features specific to defect types
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Classification Head
+        # Flattened size: 128 channels * 8 width * 8 height = 8192
+        self.fc1 = nn.Linear(128 * 8 * 8, 256)
+        self.dropout = nn.Dropout(0.5)  # Reduces overfitting
+        self.fc2 = nn.Linear(256, num_classes)
+
+    def forward(self, x):
+        """
+        Defines the forward pass of the model.
+        """
+        # Block 1 execution
+        x = self.pool1(F.relu(self.bn1(self.conv1(x))))
+
+        # Block 2 execution
+        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
+
+        # Block 3 execution
+        x = self.pool3(F.relu(self.bn3(self.conv3(x))))
+
+        # Flatten for the fully connected layers
+        x = x.view(-1, 128 * 8 * 8)
+
+        # Fully connected layers with ReLU and Dropout
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+
+        # Output layer (Returns raw logits for CrossEntropyLoss)
+        x = self.fc2(x)
+
+        return x
+
+# %% [markdown]
+# ### Model Summary and Initialization
+# **Note:** The model expects input tensors of shape (Batch_Size, 1, 64, 64).
+
+# %% Initialization Example
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model = TextileBaselineCNN(num_classes=6).to(device)
+# print(model)
+
+# %% [markdown]
+# ### Streamlined Training Pipeline
+# **Task:** High-performance training with modular design and auto-hardware detection.
+# **Refactoring:** Encapsulated logic to minimize code redundancy while maintaining multi-GPU support.
+
+# %% Execution Implementation
+import torch, torch.nn as nn, torch.optim as optim
+from torch.utils.data import DataLoader
+from pathlib import Path
+
+
+# 1. Compact Device Selection (NVIDIA -> AMD -> CPU)
+def get_device():
+    if torch.cuda.is_available(): return torch.device("cuda"), "NVIDIA GPU"
+    try:
+        import torch_directml
+        return torch_directml.device(), "AMD GPU (DirectML)"
+    except:
+        return torch.device("cpu"), "CPU"
+
+
+device, dev_name = get_device()
+print(f"🚀 Training on: {dev_name}")
+
+# 2. Setup & Hyperparameters
+cfg = {"batch": 64, "lr": 0.001, "epochs": 10, "h5": Path("data/processed/full64.h5")}
+train_loader = DataLoader(TextileDataset("data/processed/train_split.csv", cfg["h5"]), batch_size=cfg["batch"],
+                          shuffle=True)
+val_loader = DataLoader(TextileDataset("data/processed/val_split.csv", cfg["h5"]), batch_size=cfg["batch"])
+
+# 3. Model & Engine Initialization
+model = TextileBaselineCNN(num_classes=6).to(device)
+criterion, optimizer = nn.CrossEntropyLoss(), optim.Adam(model.parameters(), lr=cfg["lr"])
+
+
+# 4. Helper for Training/Evaluation Step
+def run_step(loader, is_train=True):
+    model.train() if is_train else model.eval()
+    total_loss, correct, total = 0, 0, 0
+    with torch.set_grad_enabled(is_train):
+        for imgs, labels in loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+            if is_train:
+                optimizer.zero_grad();
+                loss.backward();
+                optimizer.step()
+
+            total_loss += loss.item()
+            _, pred = torch.max(outputs, 1)
+            total += labels.size(0);
+            correct += (pred == labels).sum().item()
+    return total_loss / len(loader), 100 * correct / total
+
+
+# 5. Optimized Main Loop
+for epoch in range(cfg["epochs"]):
+    train_loss, train_acc = run_step(train_loader, is_train=True)
+    val_loss, val_acc = run_step(val_loader, is_train=False)
+
+    print(f"Epoch [{epoch + 1:02d}/{cfg['epochs']}] | "
+          f"Train: {train_acc:>5.2f}% (Loss: {train_loss:.4f}) | "
+          f"Val: {val_acc:>5.2f}% (Loss: {val_loss:.4f})")
+
+print(f"✅ Training completed on {dev_name}.")
