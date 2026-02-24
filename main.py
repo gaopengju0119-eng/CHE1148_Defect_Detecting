@@ -470,6 +470,50 @@ class TextileBaselineCNN(nn.Module):
 # print(model)
 
 # %% [markdown]
+# ### Model Training Utilities
+# **Task:** Implement Early Stopping to prevent overfitting and handle training fluctuations.
+# **Mechanism:** Monitors validation loss and saves the best performing model state.
+
+# %% Early Stopping Implementation
+import copy
+
+
+class EarlyStopping:
+    def __init__(self, patience=3, delta=0, verbose=True):
+        """
+        Args:
+            patience (int): How many epochs to wait after last time validation loss improved.
+            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+            verbose (bool): If True, prints a message for each validation loss improvement.
+        """
+        self.patience = patience
+        self.delta = delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+        self.best_model_state = None
+
+    def __call__(self, val_loss, model):
+        # 如果当前验证损失优于历史最佳值（超过阈值 delta）
+        if val_loss < self.best_loss - self.delta:
+            self.best_loss = val_loss
+            # 关键：使用深拷贝保存当前最优的模型权重，防止后续训练修改它
+            self.best_model_state = copy.deepcopy(model.state_dict())
+            self.counter = 0
+            if self.verbose:
+                print(f"📉 Validation loss decreased ({val_loss:.4f}). Saving best model weights...")
+        else:
+            # 验证损失没有改善，计数器加 1
+            self.counter += 1
+            if self.verbose:
+                print(f"⚠️ EarlyStopping counter: {self.counter} out of {self.patience}")
+
+            # 如果连续不改善次数达到耐心值，触发停止信号
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+# %% [markdown]
 # ### Streamlined Training Pipeline
 # **Task:** High-performance training with modular design and auto-hardware detection.
 # **Refactoring:** Encapsulated logic to minimize code redundancy while maintaining multi-GPU support.
@@ -494,7 +538,7 @@ device, dev_name = get_device()
 print(f"🚀 Training on: {dev_name}")
 
 # 2. Setup & Hyperparameters
-cfg = {"batch": 64, "lr": 0.001, "epochs": 10, "h5": Path("data/processed/full64.h5")}
+cfg = {"batch": 64, "lr": 0.001, "epochs": 30, "h5": Path("data/processed/full64.h5")}
 train_loader = DataLoader(TextileDataset("data/processed/train_split.csv", cfg["h5"]),
                           batch_size=cfg["batch"], shuffle=True)
 val_loader = DataLoader(TextileDataset("data/processed/val_split.csv", cfg["h5"]),
@@ -512,7 +556,7 @@ print(f"验证集标签样本: {val_batch[1][:5].tolist()}")
 model = TextileBaselineCNN(num_classes=6).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], foreach=False)
-
+early_stopping = EarlyStopping(patience=5, verbose=True)
 
 # 4. Helper for Training/Evaluation Step
 def run_step(loader, is_train=True):
@@ -544,4 +588,15 @@ for epoch in range(cfg["epochs"]):
           f"Train: {train_acc:>5.2f}% (Loss: {train_loss:.4f}) | "
           f"Val: {val_acc:>5.2f}% (Loss: {val_loss:.4f})")
 
-print(f"✅ Training completed on {dev_name}.")
+    early_stopping(val_loss, model)
+
+    if early_stopping.early_stop:
+        print("🛑 Early stopping triggered. Training halted to prevent overfitting.")
+        # 恢复到表现最好的那一轮的权重
+        model.load_state_dict(early_stopping.best_model_state)
+        break
+if early_stopping.best_model_state is not None:
+    model.load_state_dict(early_stopping.best_model_state)
+
+torch.save(model.state_dict(), "best_textile_baseline.pth")
+print(f"✅ Best model saved as 'best_textile_baseline.pth' (Best Val Loss: {early_stopping.best_loss:.4f})")
