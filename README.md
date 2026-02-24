@@ -3,7 +3,7 @@
 
 # Textile Defect Detection
 
-An automated pipeline for textile surface defect classification using deep learning, featuring MD5-based data purification and AMD GPU (DirectML) acceleration.
+An automated pipeline for textile surface defect classification using deep learning, featuring MD5-based data purification and GPU acceleration.
 
 ## 1. Repository Structure
 
