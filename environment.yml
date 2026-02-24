@@ -11,3 +11,4 @@ dependencies:
   - tqdm
   - pandas
   - torch
+  - torch-directml

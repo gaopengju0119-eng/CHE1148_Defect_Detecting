@@ -7,19 +7,15 @@
 # **Outputs:** `full64.h5` and `full64.csv` in the `data/processed` directory.
 
 # %% Data Preprocessing Implementation
-from pathlib import Path
-
+import os
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import h5py
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-import h5py
-import hashlib
-import numpy as np
-import pandas as pd
-import torch
+from pathlib import Path
 
 # Path configuration using pathlib for cross-platform compatibility
 ROOT = Path(__file__).resolve().parent
@@ -282,38 +278,46 @@ PROCESSED.mkdir(parents=True, exist_ok=True)
 
 
 def create_official_tri_split():
-    # 1. Load Author's Original CSVs
+    # 1. Load original metadata from RAW directory
     train_df_full = pd.read_csv(RAW / "train64.csv")
     test_df_full = pd.read_csv(RAW / "test64.csv")
 
-    # 2. Sub-split the Training set to create a Validation set
-    # We use 'index' to ensure all 8 rotations of an image stay together
-    unique_train_indices = train_df_full['index'].unique()
+    # --- Core Fix: Establish absolute pointers for full64.h5 ---
+    # Training data takes the first chunk of full64.h5
+    train_df_full['abs_ptr'] = range(len(train_df_full))
+    # Test data follows training data
+    test_offset = len(train_df_full)
+    test_df_full['abs_ptr'] = range(test_offset, test_offset + len(test_df_full))
 
-    # Stratify based on the first occurrence of each image's type
+    # 2. Group by 'index' to avoid rotation leakage
+    unique_train_indices = train_df_full['index'].unique()
     stratify_labels = train_df_full.drop_duplicates('index')['indication_type']
 
+    # 3. Sub-split author's 'train' into our local Train and Val
     train_indices, val_indices = train_test_split(
         unique_train_indices,
-        test_size=0.10,  # 10% for validation
+        test_size=0.10,
         random_state=42,
         stratify=stratify_labels
     )
 
-    # 3. Map indices back to full records
-    df_train = train_df_full[train_df_full['index'].isin(train_indices)]
-    df_val = train_df_full[train_df_full['index'].isin(val_indices)]
-    df_test = test_df_full  # Test remains untouched
+    # 4. Map back
+    df_train = train_df_full[train_df_full['index'].isin(train_indices)].copy()
+    df_val = train_df_full[train_df_full['index'].isin(val_indices)].copy()
+    df_test = test_df_full.copy()
 
-    # 4. Save metadata for the training pipeline
+    # --- 关键插入点：全局打乱 (Global Shuffling) ---
+    # frac=1 表示抽取100%的数据，即全量打乱顺序
+    df_train = df_train.sample(frac=1, random_state=42).reset_index(drop=True)
+    df_val = df_val.sample(frac=1, random_state=42).reset_index(drop=True)
+    # ----------------------------------------------
+
+    # 5. Save to CSV
     df_train.to_csv(PROCESSED / "train_split.csv", index=False)
     df_val.to_csv(PROCESSED / "val_split.csv", index=False)
     df_test.to_csv(PROCESSED / "test_split.csv", index=False)
 
-    print(f"Successfully split based on author's files:")
-    print(f" - Train: {len(df_train)} samples (from train64.h5)")
-    print(f" - Val:   {len(df_val)} samples (from train64.h5)")
-    print(f" - Test:  {len(df_test)} samples (from test64.h5)")
+    print(f"✅ Split and Shuffling complete. Train: {len(df_train)}, Val: {len(df_val)}")
 
 
 if __name__ == "__main__":
@@ -357,35 +361,31 @@ class TextileDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Retrieves a single sample from the dataset.
-        Handles on-the-fly loading and preprocessing to save RAM.
+        Retrieves a sample from the dataset with automatic scaling detection.
         """
-        # 1. Retrieve metadata for the current index
+        # 1. Retrieve metadata using the absolute pointer
         row = self.df.iloc[idx]
-        global_idx = row['index']  # The original physical index in the H5 file
+        global_idx = int(row['abs_ptr'])
         label_str = row['indication_type']
 
-        # 2. Access the image from the H5 file
-        # We open the file in 'r' mode within the getter to support multi-process loading
+        # 2. Access the image from H5
         with h5py.File(self.h5_path, 'r') as f:
-            # Expected raw shape: (64, 64, 1)
             img = f['images'][global_idx]
 
-        # 3. Preprocessing Step 1: Normalization/Scaling
-        # Convert uint8 [0, 255] to float32 [0.0, 1.0] for stable gradient descent
-        img = img.astype(np.float32) / 255.0
+        # 3. --- 核心修复：智能缩放逻辑 ---
+        # 如果数据是 uint8 (0-255)，则除以 255 转为 0-1
+        if img.dtype == np.uint8:
+            img = img.astype(np.float32) / 255.0
+        else:
+            # 如果已经是 float32，说明已经是 0-1 范围，直接转换即可
+            img = img.astype(np.float32)
+        # --------------------------------
 
-        # 4. Preprocessing Step 2: Dimension Permutation
-        # Convert (Height, Width, Channel) to (Channel, Height, Width)
-        # This is mandatory for PyTorch convolutional layers
+        # 4. Dimension Permutation (H,W,C) -> (C,H,W)
         img = np.transpose(img, (2, 0, 1))
 
-        # 5. Preprocessing Step 3: Label Mapping
-        # Convert the string label (e.g., 'hole') to its integer ID
+        # 5. Label Mapping & Tensorization
         label = self.label_map[label_str]
-
-        # 6. Preprocessing Step 4: Tensorization
-        # Final conversion to PyTorch tensors for computation
         image_tensor = torch.from_numpy(img)
         label_tensor = torch.tensor(label, dtype=torch.long)
 
@@ -495,13 +495,23 @@ print(f"🚀 Training on: {dev_name}")
 
 # 2. Setup & Hyperparameters
 cfg = {"batch": 64, "lr": 0.001, "epochs": 10, "h5": Path("data/processed/full64.h5")}
-train_loader = DataLoader(TextileDataset("data/processed/train_split.csv", cfg["h5"]), batch_size=cfg["batch"],
-                          shuffle=True)
-val_loader = DataLoader(TextileDataset("data/processed/val_split.csv", cfg["h5"]), batch_size=cfg["batch"])
+train_loader = DataLoader(TextileDataset("data/processed/train_split.csv", cfg["h5"]),
+                          batch_size=cfg["batch"], shuffle=True)
+val_loader = DataLoader(TextileDataset("data/processed/val_split.csv", cfg["h5"]),
+                        batch_size=cfg["batch"], shuffle=True)
+
+train_batch = next(iter(train_loader))
+val_batch = next(iter(val_loader))
+
+print(f"训练集像素最大值: {train_batch[0].max().item():.2f}")
+print(f"验证集像素最大值: {val_batch[0].max().item():.2f}")
+print(f"训练集标签样本: {train_batch[1][:5].tolist()}")
+print(f"验证集标签样本: {val_batch[1][:5].tolist()}")
 
 # 3. Model & Engine Initialization
 model = TextileBaselineCNN(num_classes=6).to(device)
-criterion, optimizer = nn.CrossEntropyLoss(), optim.Adam(model.parameters(), lr=cfg["lr"])
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], foreach=False)
 
 
 # 4. Helper for Training/Evaluation Step
@@ -514,13 +524,13 @@ def run_step(loader, is_train=True):
             outputs = model(imgs)
             loss = criterion(outputs, labels)
             if is_train:
-                optimizer.zero_grad();
-                loss.backward();
+                optimizer.zero_grad()
+                loss.backward()
                 optimizer.step()
 
             total_loss += loss.item()
             _, pred = torch.max(outputs, 1)
-            total += labels.size(0);
+            total += labels.size(0)
             correct += (pred == labels).sum().item()
     return total_loss / len(loader), 100 * correct / total
 
