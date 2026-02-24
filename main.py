@@ -1,493 +1,232 @@
 # %% [markdown]
-# ### Data Merging Pipeline (Refined)
-# **Task:** Merge train/test H5 and CSV files while preserving original split information.
-# **Key Changes:**
-# 1. Renamed original 'split' column to 'original_split'.
-# 2. Removed 'global_index' and 'source_split' to maintain the original column count.
-# **Outputs:** `full64.h5` and `full64.csv` in the `data/processed` directory.
+# ### Project: Textile Defect Detection Baseline
+# **Task:** End-to-end pipeline including data merging, MD5-based deduplication,
+# stratified splitting, and CNN training with Early Stopping.
 
-# %% Data Preprocessing Implementation
-import os
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-import h5py
-import numpy as np
-import pandas as pd
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset
-from pathlib import Path
-
-# Path configuration using pathlib for cross-platform compatibility
-ROOT = Path(__file__).resolve().parent
-RAW = ROOT / "data" / "raw" / "textile"
-OUT = ROOT / "data" / "processed"
-OUT.mkdir(parents=True, exist_ok=True)
-
-# Define source file paths
-TRAIN_H5 = RAW / "train64.h5"
-TRAIN_CSV = RAW / "train64.csv"
-TEST_H5 = RAW / "test64.h5"
-TEST_CSV = RAW / "test64.csv"
-
-# Define output file paths
-OUT_H5 = OUT / "full64.h5"
-OUT_CSV = OUT / "full64.csv"
-
-DSET = "images"      # Dataset name inside the H5 file
-CHUNK = 2048         # Processing batch size to manage memory usage
-
-
-def merge_csv():
-    """
-    Merges metadata CSV files.
-    Renames the 'split' column to 'original_split' and preserves all original data
-    without adding new columns or indices.
-    """
-    tr = pd.read_csv(TRAIN_CSV)
-    te = pd.read_csv(TEST_CSV)
-
-    # Concatenate the dataframes
-    full = pd.concat([tr, te], ignore_index=True)
-
-    # Rename 'split' to 'original_split' to track origin while keeping column count constant
-    full = full.rename(columns={"split": "original_split"})
-
-    # Save to CSV without the pandas default index column
-    full.to_csv(OUT_CSV, index=False)
-    print("Saved:", OUT_CSV)
-
-
-def merge_h5():
-    """
-    Merges H5 image data using a chunking strategy to prevent memory overflow.
-    Verifies that image dimensions and data types match before merging.
-    """
-    with h5py.File(TRAIN_H5, "r") as ftr, h5py.File(TEST_H5, "r") as fte:
-        xtr = ftr[DSET]
-        xte = fte[DSET]
-
-        # Integrity check: Ensure spatial dimensions and dtypes match
-        if xtr.shape[1:] != xte.shape[1:]:
-            raise ValueError(f"Shape mismatch: train {xtr.shape} vs test {xte.shape}")
-        if xtr.dtype != xte.dtype:
-            raise ValueError(f"Dtype mismatch: train {xtr.dtype} vs test {xte.dtype}")
-
-        ntr, nte = xtr.shape[0], xte.shape[0]
-        ntotal = ntr + nte
-
-        with h5py.File(OUT_H5, "w") as fout:
-            # Create an empty dataset with the combined total shape
-            y = fout.create_dataset(DSET, shape=(ntotal, *xtr.shape[1:]), dtype=xtr.dtype)
-
-            # Copy training data in chunks
-            for i in range(0, ntr, CHUNK):
-                j = min(i + CHUNK, ntr)
-                y[i:j] = xtr[i:j]
-
-            # Copy test data in chunks with an offset
-            offset = ntr
-            for i in range(0, nte, CHUNK):
-                j = min(i + CHUNK, nte)
-                y[offset + i: offset + j] = xte[i:j]
-
-    print("Saved:", OUT_H5)
-
-
-if __name__ == "__main__":
-    merge_csv()
-    merge_h5()
-    print("Done. Combined dataset created successfully.")
-
-# %% End of merging cell
-
-# %% [markdown]
-# ### Dataset Integrity and Duplicate Check
-# **Task:** Verify the merged `full64.h5` file, count total images, and detect identical duplicates.
-# **Method:** Uses MD5 hashing to efficiently compare image data without overloading memory.
-
-# %% Integrity Check Implementation
-from pathlib import Path
-
-# Path configuration (must match your previous merging script)
-ROOT = Path(__file__).resolve().parent
-OUT_H5 = ROOT / "data" / "processed" / "full64.h5"
-DSET = "images"
-CHUNK_SIZE = 1000  # Number of images to process at a time to save RAM
-
-
-def check_h5_integrity():
-    if not OUT_H5.exists():
-        print(f"Error: File not found at {OUT_H5}")
-        return
-
-    print(f"Opening file: {OUT_H5}")
-    try:
-        with h5py.File(OUT_H5, "r") as f:
-            if DSET not in f:
-                print(f"Error: Dataset '{DSET}' not found in the H5 file.")
-                return
-
-            dataset = f[DSET]
-            total_images = dataset.shape[0]
-            img_shape = dataset.shape[1:]
-
-            print(f"--- Dataset Statistics ---")
-            print(f"Total Number of Images: {total_images}")
-            print(f"Image Dimensions: {img_shape}")
-            print(f"Data Type: {dataset.dtype}")
-            print("-" * 30)
-
-            # Duplicate Check using MD5 Hashing
-            print("Scanning for duplicate images (processing in chunks)...")
-            hashes = set()
-            duplicate_count = 0
-
-            for i in range(0, total_images, CHUNK_SIZE):
-                end = min(i + CHUNK_SIZE, total_images)
-                batch = dataset[i:end]
-
-                for img in batch:
-                    # Convert the image array to bytes and generate a unique hash
-                    img_hash = hashlib.md5(img.tobytes()).hexdigest()
-
-                    if img_hash in hashes:
-                        duplicate_count += 1
-                    else:
-                        hashes.add(img_hash)
-
-            if duplicate_count == 0:
-                print(f"Verified: No duplicates found. All {total_images} images are unique.")
-            else:
-                print(f"Result: Found {duplicate_count} duplicate images.")
-                print(f"Total Unique Images: {len(hashes)}")
-
-    except Exception as e:
-        print(f"Integrity check failed: {e}")
-
-
-if __name__ == "__main__":
-    check_h5_integrity()
-
-# %% End of Integrity Check Cell
-
-# %% [markdown]
-# ### Duplicate Images Origin Analysis
-# **Task:** Identify the 391 duplicates and export their metadata to CSV.
-# **Purpose:** Check if duplicates cross the Train/Test boundary (Data Leakage).
-
-# %% Implementation
+import copy
 import hashlib
-from pathlib import Path
-from collections import defaultdict
-
-# Configuration
-ROOT = Path(__file__).resolve().parent
-H5_PATH = ROOT / "data" / "processed" / "full64.h5"
-CSV_PATH = ROOT / "data" / "processed" / "full64.csv"
-OUTPUT_PATH = ROOT / "data" / "processed" / "duplicates_report.csv"
-
-
-def analyze_duplicates():
-    # 1. Load Metadata
-    print("Loading metadata...")
-    df = pd.read_csv(CSV_PATH)
-
-    # 2. Scan H5 for hashes
-    print("Scanning H5 images for duplicates (this may take a minute)...")
-    hash_map = defaultdict(list)  # Stores {md5_hash: [list_of_row_indices]}
-
-    with h5py.File(H5_PATH, "r") as f:
-        images = f["images"]
-        total = images.shape[0]
-
-        # We process in small batches to save memory
-        chunk_size = 1000
-        for start in range(0, total, chunk_size):
-            end = min(start + chunk_size, total)
-            batch = images[start:end]
-
-            for i, img in enumerate(batch):
-                global_idx = start + i
-                # Generate unique fingerpint for the image
-                img_hash = hashlib.md5(img.tobytes()).hexdigest()
-                hash_map[img_hash].append(global_idx)
-
-    # 3. Identify all duplicate groups
-    # A group is a duplicate if it has more than 1 index for the same hash
-    duplicate_indices = []
-    hash_group_id = []
-    group_counter = 0
-
-    for img_hash, indices in hash_map.items():
-        if len(indices) > 1:
-            duplicate_indices.extend(indices)
-            # Assign a group ID so we can see which images are identical to each other
-            for _ in indices:
-                hash_group_id.append(f"Group_{group_counter}")
-            group_counter += 1
-
-    # 4. Extract metadata and save
-    if duplicate_indices:
-        # Create a report dataframe
-        report_df = df.iloc[duplicate_indices].copy()
-        report_df['duplicate_group_id'] = hash_group_id
-
-        # Sort by group ID to see identical images next to each other
-        report_df = report_df.sort_values(by=['duplicate_group_id', 'original_split'])
-
-        # Save to CSV
-        report_df.to_csv(OUTPUT_PATH, index=False)
-
-        print("-" * 30)
-        print(f"Analysis Complete!")
-        print(f"Total rows involved in duplicates: {len(report_df)}")
-        print(f"Number of unique duplicate groups: {group_counter}")
-        print(f"Report saved to: {OUTPUT_PATH}")
-
-        # Cross-split check (The most important part for PhD rigor)
-        leakage = report_df.groupby('duplicate_group_id')['original_split'].nunique()
-        cross_split_count = (leakage > 1).sum()
-        if cross_split_count > 0:
-            print(f"\n[WARNING] Found {cross_split_count} groups that cross the Train/Test boundary!")
-            print("This indicates minor Data Leakage.")
-        else:
-            print("\n[SAFE] All duplicates are contained within their own splits. No leakage found.")
-    else:
-        print("No duplicates found.")
-
-
-if __name__ == "__main__":
-    analyze_duplicates()
-
-# %% End of Duplicate Images Origin Analysis
-
 # %% [markdown]
-# ### Official Split Implementation
-# **Task:** Sub-split author's 'train64' into Train/Val, and keep 'test64' as final Test.
-# **Integrity:** Grouping by 'index' is preserved to prevent rotation leakage.
-
-# %% Splitting Implementation
-from sklearn.model_selection import train_test_split
+# ### 1. Imports and Configuration
+import os
+from collections import defaultdict
 from pathlib import Path
 
-# Path configuration (Point to your RAW folder)
+import h5py
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+
+# Disable HDF5 file locking for better compatibility
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
+# Path configuration
 ROOT = Path(__file__).resolve().parent
 RAW = ROOT / "data" / "raw" / "textile"
 PROCESSED = ROOT / "data" / "processed"
 PROCESSED.mkdir(parents=True, exist_ok=True)
 
+# File paths
+TRAIN_H5, TRAIN_CSV = RAW / "train64.h5", RAW / "train64.csv"
+TEST_H5, TEST_CSV = RAW / "test64.h5", RAW / "test64.csv"
+OUT_H5, OUT_CSV = PROCESSED / "full64.h5", PROCESSED / "full64.csv"
 
-def create_official_tri_split():
-    # 1. Load original metadata from RAW directory
-    train_df_full = pd.read_csv(RAW / "train64.csv")
-    test_df_full = pd.read_csv(RAW / "test64.csv")
+# Device setup
+device = torch.device("cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    try:
+        import torch_directml
 
-    # --- Core Fix: Establish absolute pointers for full64.h5 ---
-    # Training data takes the first chunk of full64.h5
-    train_df_full['abs_ptr'] = range(len(train_df_full))
-    # Test data follows training data
-    test_offset = len(train_df_full)
-    test_df_full['abs_ptr'] = range(test_offset, test_offset + len(test_df_full))
-
-    # 2. Group by 'index' to avoid rotation leakage
-    unique_train_indices = train_df_full['index'].unique()
-    stratify_labels = train_df_full.drop_duplicates('index')['indication_type']
-
-    # 3. Sub-split author's 'train' into our local Train and Val
-    train_indices, val_indices = train_test_split(
-        unique_train_indices,
-        test_size=0.10,
-        random_state=42,
-        stratify=stratify_labels
-    )
-
-    # 4. Map back
-    df_train = train_df_full[train_df_full['index'].isin(train_indices)].copy()
-    df_val = train_df_full[train_df_full['index'].isin(val_indices)].copy()
-    df_test = test_df_full.copy()
-
-    # --- 关键插入点：全局打乱 (Global Shuffling) ---
-    # frac=1 表示抽取100%的数据，即全量打乱顺序
-    df_train = df_train.sample(frac=1, random_state=42).reset_index(drop=True)
-    df_val = df_val.sample(frac=1, random_state=42).reset_index(drop=True)
-    # ----------------------------------------------
-
-    # 5. Save to CSV
-    df_train.to_csv(PROCESSED / "train_split.csv", index=False)
-    df_val.to_csv(PROCESSED / "val_split.csv", index=False)
-    df_test.to_csv(PROCESSED / "test_split.csv", index=False)
-
-    print(f"✅ Split and Shuffling complete. Train: {len(df_train)}, Val: {len(df_val)}")
-
-
-if __name__ == "__main__":
-    create_official_tri_split()
-# %% End of splitting
+        device = torch_directml.device()
+    except ImportError:
+        pass
 
 
 # %% [markdown]
-# ### Custom PyTorch Dataset Implementation
-# **Task:** Develop a memory-efficient data loader to fetch textile images from H5 files using CSV metadata.
-# **Integrity:** Normalizes pixel ranges and ensures dimension alignment (CHW) for PyTorch model compatibility.
+# ### 2. Data Merging and Preprocessing
+def merge_data():
+    """Merge separate train/test H5 and CSV files into a unified dataset."""
+    if OUT_H5.exists() and OUT_CSV.exists():
+        print("Dataset already merged. Skipping.")
+        return
 
-# %% Dataset Implementation
+    # Merge CSVs
+    df_train = pd.read_csv(TRAIN_CSV)
+    df_test = pd.read_csv(TEST_CSV)
+    df_train['original_split'] = 'train'
+    df_test['original_split'] = 'test'
+    full_df = pd.concat([df_train, df_test], ignore_index=True)
+    full_df.to_csv(OUT_CSV, index=False)
+    print(f"Saved merged CSV: {OUT_CSV}")
 
+    # Merge H5s
+    with h5py.File(OUT_H5, 'w') as f_out:
+        with h5py.File(TRAIN_H5, 'r') as f_tr, h5py.File(TEST_H5, 'r') as f_te:
+            tr_imgs = f_tr['images']
+            te_imgs = f_te['images']
+            total_shape = (tr_imgs.shape[0] + te_imgs.shape[0], *tr_imgs.shape[1:])
+            dset = f_out.create_dataset('images', shape=total_shape, dtype='f')
+            dset[:tr_imgs.shape[0]] = tr_imgs[:]
+            dset[tr_imgs.shape[0]:] = te_imgs[:]
+    print(f"Saved merged H5: {OUT_H5}")
+
+
+# %% [markdown]
+# ### 3. Integrity and Deduplication Analysis
+def get_h5_hashes(h5_path, total_images, chunk_size=5000):
+    """Generate MD5 fingerprints for all images in the H5 file."""
+    hashes = [None] * total_images
+    print(f"Generating MD5 fingerprints for {total_images} images...")
+    with h5py.File(h5_path, 'r') as f:
+        for start in range(0, total_images, chunk_size):
+            end = min(start + chunk_size, total_images)
+            chunk = f['images'][start:end]
+            for i, img in enumerate(chunk):
+                h = hashlib.md5(img.tobytes()).hexdigest()
+                hashes[start + i] = h
+    return hashes
+
+
+def analyze_duplicates():
+    """Identify duplicate images and check for data leakage."""
+    df = pd.read_csv(OUT_CSV)
+    with h5py.File(OUT_H5, "r") as f:
+        total = f["images"].shape[0]
+
+    all_hashes = get_h5_hashes(OUT_H5, total)
+    hash_map = defaultdict(list)
+    for idx, h in enumerate(all_hashes):
+        hash_map[h].append(idx)
+
+    duplicate_indices = [idx for indices in hash_map.values() if len(indices) > 1 for idx in indices]
+
+    if duplicate_indices:
+        report_df = df.iloc[duplicate_indices].copy()
+        report_df.to_csv(PROCESSED / "duplicates_report.csv", index=False)
+        leakage = report_df.groupby('index')['original_split'].nunique()
+        if (leakage > 1).any():
+            print("[WARNING] Data leakage detected across splits!")
+        else:
+            print("[SAFE] No leakage found among duplicates.")
+    return all_hashes
+
+
+# %% [markdown]
+# ### 4. Dataset Splitting with Per-Split Deduplication
+def create_clean_split(all_hashes):
+    """Split dataset and remove internal duplicates from train and test sets."""
+    df = pd.read_csv(OUT_CSV)
+    df['abs_ptr'] = range(len(df))
+    df['md5'] = all_hashes
+
+    # Separate original train and test portions
+    tr_df = df[df['original_split'] == 'train'].copy()
+    te_df = df[df['original_split'] == 'test'].copy()
+
+    # Deduplicate within each portion
+    tr_df = tr_df.drop_duplicates(subset='md5', keep='first')
+    te_df = te_df.drop_duplicates(subset='md5', keep='first')
+
+    # Stratified Split (Training -> Train/Val)
+    unique_indices = tr_df['index'].unique()
+    strat_labels = tr_df.drop_duplicates('index')['indication_type']
+
+    train_idx, val_idx = train_test_split(
+        unique_indices, test_size=0.1, random_state=42, stratify=strat_labels
+    )
+
+    df_train = tr_df[tr_df['index'].isin(train_idx)].sample(frac=1, random_state=42)
+    df_val = tr_df[tr_df['index'].isin(val_idx)].sample(frac=1, random_state=42)
+
+    df_train.to_csv(PROCESSED / "train_split.csv", index=False)
+    df_val.to_csv(PROCESSED / "val_split.csv", index=False)
+    te_df.to_csv(PROCESSED / "test_split.csv", index=False)
+
+    print(f"Datasets finalized: Train({len(df_train)}), Val({len(df_val)}), Test({len(te_df)})")
+
+
+# %% [markdown]
+# ### 5. PyTorch Dataset and Model Definition
 class TextileDataset(Dataset):
-    """
-    Standard PyTorch Dataset class for textile defect detection.
-    Connects the processed CSV metadata with the binary H5 image storage.
-    """
-
-    def __init__(self, csv_path, h5_path, transform=None):
-        # Load the split metadata (train_split.csv, val_split.csv, or test_split.csv)
+    def __init__(self, csv_path, h5_path):
         self.df = pd.read_csv(csv_path)
         self.h5_path = h5_path
-        self.transform = transform
 
-        # Label Encoding: Map categorical strings to numerical integers
-        # Sort labels to ensure consistent mapping across different runs
+        # Define a fixed mapping for the 6 defect categories
+        # This ensures 'metal_contamination' consistently becomes an integer
         self.label_map = {
-            'color': 0,
-            'cut': 1,
-            'good': 2,
-            'hole': 3,
-            'metal_contamination': 4,
-            'thread': 5
+            'good': 0,
+            'hole': 1,
+            'metal_contamination': 2,
+            'oil_spot': 3,
+            'thread': 4,
+            'wrinkle': 5
         }
 
     def __len__(self):
-        # Return the total number of samples in the current split
         return len(self.df)
 
     def __getitem__(self, idx):
-        """
-        Retrieves a sample from the dataset with automatic scaling detection.
-        """
-        # 1. Retrieve metadata using the absolute pointer
         row = self.df.iloc[idx]
-        global_idx = int(row['abs_ptr'])
-        label_str = row['indication_type']
-
-        # 2. Access the image from H5
         with h5py.File(self.h5_path, 'r') as f:
-            img = f['images'][global_idx]
+            # Use abs_ptr to fetch the specific image from merged H5
+            img = f['images'][int(row['abs_ptr'])]
 
-        # 3. --- 核心修复：智能缩放逻辑 ---
-        # 如果数据是 uint8 (0-255)，则除以 255 转为 0-1
-        if img.dtype == np.uint8:
-            img = img.astype(np.float32) / 255.0
+        # Image Preprocessing
+        img = torch.from_numpy(img).float()
+        if img.max() > 1.0:
+            img /= 255.0
+
+        if img.ndim == 2:
+            img = img.unsqueeze(0)
+        elif img.shape[-1] == 1:
+            img = img.permute(2, 0, 1)
+
+        # --- FIX: Handle string labels ---
+        label_raw = row['indication_type']
+        if isinstance(label_raw, str):
+            # Convert string name to integer index using our map
+            label = self.label_map.get(label_raw, 0)
         else:
-            # 如果已经是 float32，说明已经是 0-1 范围，直接转换即可
-            img = img.astype(np.float32)
-        # --------------------------------
+            # If it's already a number, just ensure it's an int
+            label = int(label_raw)
 
-        # 4. Dimension Permutation (H,W,C) -> (C,H,W)
-        img = np.transpose(img, (2, 0, 1))
+        return img, torch.tensor(label, dtype=torch.long)
 
-        # 5. Label Mapping & Tensorization
-        label = self.label_map[label_str]
-        image_tensor = torch.from_numpy(img)
-        label_tensor = torch.tensor(label, dtype=torch.long)
-
-        return image_tensor, label_tensor
-
-# %% [markdown]
-# ### Dataset Instantiation Example
-# **Note:** Replace the paths below with your actual local file locations.
-# The 'train64.h5' and 'test64.h5' should be the original files provided by the author.
-# %% [markdown]
-# ### Baseline CNN Model Architecture
-# **Task:** Define a standard Convolutional Neural Network (CNN) for 6-class grayscale image classification.
-# **Design:** Uses 3 convolutional blocks followed by fully connected layers to extract and classify defect features.
-
-# %% Model Implementation
 
 class TextileBaselineCNN(nn.Module):
-    """
-    A standard CNN baseline for 64x64 grayscale images.
-    Consists of three convolutional blocks and a classification head.
-    """
-
     def __init__(self, num_classes=6):
-        super(TextileBaselineCNN, self).__init__()
-
-        # Block 1: Input (1, 64, 64) -> Output (32, 32, 32)
-        # Extracts low-level features like edges and basic textures
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Block 2: Input (32, 32, 32) -> Output (64, 16, 16)
-        # Extracts mid-level geometric patterns (e.g., holes, threads)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Block 3: Input (64, 16, 16) -> Output (128, 8, 8)
-        # Extracts high-level semantic features specific to defect types
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Classification Head
-        # Flattened size: 128 channels * 8 width * 8 height = 8192
-        self.fc1 = nn.Linear(128 * 8 * 8, 256)
-        self.dropout = nn.Dropout(0.5)  # Reduces overfitting
-        self.fc2 = nn.Linear(256, num_classes)
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 8 * 8, 256), nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
 
     def forward(self, x):
-        """
-        Defines the forward pass of the model.
-        """
-        # Block 1 execution
-        x = self.pool1(F.relu(self.bn1(self.conv1(x))))
+        return self.classifier(self.features(x))
 
-        # Block 2 execution
-        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
-
-        # Block 3 execution
-        x = self.pool3(F.relu(self.bn3(self.conv3(x))))
-
-        # Flatten for the fully connected layers
-        x = x.view(-1, 128 * 8 * 8)
-
-        # Fully connected layers with ReLU and Dropout
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-
-        # Output layer (Returns raw logits for CrossEntropyLoss)
-        x = self.fc2(x)
-
-        return x
 
 # %% [markdown]
-# ### Model Summary and Initialization
-# **Note:** The model expects input tensors of shape (Batch_Size, 1, 64, 64).
-
-# %% Initialization Example
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# model = TextileBaselineCNN(num_classes=6).to(device)
-# print(model)
-
-# %% [markdown]
-# ### Model Training Utilities
-# **Task:** Implement Early Stopping to prevent overfitting and handle training fluctuations.
-# **Mechanism:** Monitors validation loss and saves the best performing model state.
-
-# %% Early Stopping Implementation
-import copy
-
-
+# ### 6. Training Utilities and Early Stopping
 class EarlyStopping:
-    def __init__(self, patience=3, delta=0, verbose=True):
-        """
-        Args:
-            patience (int): How many epochs to wait after last time validation loss improved.
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-            verbose (bool): If True, prints a message for each validation loss improvement.
-        """
+    def __init__(self, patience=5, verbose=True):
         self.patience = patience
-        self.delta = delta
         self.verbose = verbose
         self.counter = 0
         self.best_loss = float('inf')
@@ -495,71 +234,20 @@ class EarlyStopping:
         self.best_model_state = None
 
     def __call__(self, val_loss, model):
-        # 如果当前验证损失优于历史最佳值（超过阈值 delta）
-        if val_loss < self.best_loss - self.delta:
+        if val_loss < self.best_loss:
             self.best_loss = val_loss
-            # 关键：使用深拷贝保存当前最优的模型权重，防止后续训练修改它
             self.best_model_state = copy.deepcopy(model.state_dict())
             self.counter = 0
             if self.verbose:
-                print(f"📉 Validation loss decreased ({val_loss:.4f}). Saving best model weights...")
+                print(f"Validation loss improved. Saving model weights.")
         else:
-            # 验证损失没有改善，计数器加 1
             self.counter += 1
-            if self.verbose:
-                print(f"⚠️ EarlyStopping counter: {self.counter} out of {self.patience}")
-
-            # 如果连续不改善次数达到耐心值，触发停止信号
+            print(f"EarlyStopping counter: {self.counter} of {self.patience}")
             if self.counter >= self.patience:
                 self.early_stop = True
 
-# %% [markdown]
-# ### Streamlined Training Pipeline
-# **Task:** High-performance training with modular design and auto-hardware detection.
-# **Refactoring:** Encapsulated logic to minimize code redundancy while maintaining multi-GPU support.
 
-# %% Execution Implementation
-import torch, torch.nn as nn, torch.optim as optim
-from torch.utils.data import DataLoader
-from pathlib import Path
-
-
-# 1. Compact Device Selection (NVIDIA -> AMD -> CPU)
-def get_device():
-    if torch.cuda.is_available(): return torch.device("cuda"), "NVIDIA GPU"
-    try:
-        import torch_directml
-        return torch_directml.device(), "AMD GPU (DirectML)"
-    except:
-        return torch.device("cpu"), "CPU"
-
-
-device, dev_name = get_device()
-print(f"🚀 Training on: {dev_name}")
-
-# 2. Setup & Hyperparameters
-cfg = {"batch": 64, "lr": 0.001, "epochs": 30, "h5": Path("data/processed/full64.h5")}
-train_loader = DataLoader(TextileDataset("data/processed/train_split.csv", cfg["h5"]),
-                          batch_size=cfg["batch"], shuffle=True)
-val_loader = DataLoader(TextileDataset("data/processed/val_split.csv", cfg["h5"]),
-                        batch_size=cfg["batch"], shuffle=True)
-
-train_batch = next(iter(train_loader))
-val_batch = next(iter(val_loader))
-
-print(f"训练集像素最大值: {train_batch[0].max().item():.2f}")
-print(f"验证集像素最大值: {val_batch[0].max().item():.2f}")
-print(f"训练集标签样本: {train_batch[1][:5].tolist()}")
-print(f"验证集标签样本: {val_batch[1][:5].tolist()}")
-
-# 3. Model & Engine Initialization
-model = TextileBaselineCNN(num_classes=6).to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], foreach=False)
-early_stopping = EarlyStopping(patience=5, verbose=True)
-
-# 4. Helper for Training/Evaluation Step
-def run_step(loader, is_train=True):
+def run_step(model, loader, criterion, optimizer, device, is_train=True):
     model.train() if is_train else model.eval()
     total_loss, correct, total = 0, 0, 0
     with torch.set_grad_enabled(is_train):
@@ -571,7 +259,6 @@ def run_step(loader, is_train=True):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
             total_loss += loss.item()
             _, pred = torch.max(outputs, 1)
             total += labels.size(0)
@@ -579,24 +266,42 @@ def run_step(loader, is_train=True):
     return total_loss / len(loader), 100 * correct / total
 
 
-# 5. Optimized Main Loop
-for epoch in range(cfg["epochs"]):
-    train_loss, train_acc = run_step(train_loader, is_train=True)
-    val_loss, val_acc = run_step(val_loader, is_train=False)
+# %% [markdown]
+# ### 7. Main Execution Flow
+if __name__ == "__main__":
+    # Parameters
+    cfg = {"batch": 64, "lr": 0.001, "epochs": 30, "patience": 7}
 
-    print(f"Epoch [{epoch + 1:02d}/{cfg['epochs']}] | "
-          f"Train: {train_acc:>5.2f}% (Loss: {train_loss:.4f}) | "
-          f"Val: {val_acc:>5.2f}% (Loss: {val_loss:.4f})")
+    # Pipeline
+    merge_data()
+    hashes = analyze_duplicates()
+    create_clean_split(hashes)
 
-    early_stopping(val_loss, model)
+    # Loaders
+    train_ds = TextileDataset(PROCESSED / "train_split.csv", OUT_H5)
+    val_ds = TextileDataset(PROCESSED / "val_split.csv", OUT_H5)
+    train_loader = DataLoader(train_ds, batch_size=cfg["batch"], shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=cfg["batch"])
 
-    if early_stopping.early_stop:
-        print("🛑 Early stopping triggered. Training halted to prevent overfitting.")
-        # 恢复到表现最好的那一轮的权重
-        model.load_state_dict(early_stopping.best_model_state)
-        break
-if early_stopping.best_model_state is not None:
-    model.load_state_dict(early_stopping.best_model_state)
+    # Initialization
+    model = TextileBaselineCNN().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], foreach=False)
+    early_stop = EarlyStopping(patience=cfg["patience"])
 
-torch.save(model.state_dict(), "best_textile_baseline.pth")
-print(f"✅ Best model saved as 'best_textile_baseline.pth' (Best Val Loss: {early_stopping.best_loss:.4f})")
+    print(f"Starting training on: {device}")
+    for epoch in range(cfg["epochs"]):
+        t_loss, t_acc = run_step(model, train_loader, criterion, optimizer, device, True)
+        v_loss, v_acc = run_step(model, val_loader, criterion, optimizer, device, False)
+
+        print(
+            f"Epoch [{epoch + 1:02d}] | Train: {t_acc:.2f}% (Loss: {t_loss:.4f}) | Val: {v_acc:.2f}% (Loss: {v_loss:.4f})")
+
+        early_stop(v_loss, model)
+        if early_stop.early_stop:
+            print("Early stopping triggered.")
+            model.load_state_dict(early_stop.best_model_state)
+            break
+
+    torch.save(model.state_dict(), "best_textile_baseline.pth")
+    print("Training Complete.")
