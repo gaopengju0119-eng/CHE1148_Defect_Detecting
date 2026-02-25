@@ -11,13 +11,11 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-import h5py
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 # Disable HDF5 file locking for better compatibility
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
@@ -153,49 +151,99 @@ def create_clean_split(all_hashes):
 
 # %% [markdown]
 # ### 5. PyTorch Dataset and Model Definition
+# --- replace your existing TextileDataset with this version ---
+
+from typing import Callable, Dict, Optional, Tuple
+
+import h5py
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+
+
+def _normalize_label(x) -> str:
+    return str(x).strip()
+
+
+def _validate_labels(observed, label_map: Dict[str, int]) -> None:
+    observed_set = set(observed)
+    map_set = set(label_map.keys())
+    unknown = sorted(observed_set - map_set)
+    if unknown:
+        raise ValueError(
+            "CSV 中出现 label_map 未定义的类别（请修正 CSV 或 label_map）：\n"
+            f"unknown_labels={unknown}\n"
+            f"label_map_keys={sorted(map_set)}"
+        )
+
+
 class TextileDataset(Dataset):
-    def __init__(self, csv_path, h5_path):
+    """
+    Textile dataset with strict label validation.
+
+    Expected CSV columns:
+      - abs_ptr: absolute pointer into merged H5 dataset
+      - indication_type: class name (string)
+    """
+
+    def __init__(
+        self,
+        csv_path,
+        h5_path,
+        *,
+        label_map: Optional[Dict[str, int]] = None,
+        transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        strict_labels: bool = True,
+    ):
         self.df = pd.read_csv(csv_path)
-        self.h5_path = h5_path
+        self.h5_path = str(h5_path)
+        self.transform = transform
 
-        # Define a fixed mapping for the 6 defect categories
-        # This ensures 'metal_contamination' consistently becomes an integer
-        self.label_map = {
-            'good': 0,
-            'hole': 1,
-            'metal_contamination': 2,
-            'oil_spot': 3,
-            'thread': 4,
-            'wrinkle': 5
+        if "abs_ptr" not in self.df.columns:
+            raise ValueError(
+                "CSV 缺少 abs_ptr 列。请使用 create_clean_split() 输出的 train_split.csv/val_split.csv/test_split.csv。"
+            )
+        if "indication_type" not in self.df.columns:
+            raise ValueError("CSV 缺少 indication_type 列。")
+
+        default_label_map = {
+            "good": 0,
+            "color": 1,
+            "cut": 2,
+            "hole": 3,
+            "thread": 4,
+            "metal_contamination": 5,
         }
+        self.label_map = default_label_map if label_map is None else dict(label_map)
 
-    def __len__(self):
+        observed = [_normalize_label(x) for x in self.df["indication_type"].tolist()]
+        if strict_labels:
+            _validate_labels(observed, self.label_map)
+        self.df["indication_type"] = observed
+
+    def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         row = self.df.iloc[idx]
-        with h5py.File(self.h5_path, 'r') as f:
-            # Use abs_ptr to fetch the specific image from merged H5
-            img = f['images'][int(row['abs_ptr'])]
 
-        # Image Preprocessing
+        with h5py.File(self.h5_path, "r") as f:
+            img = f["images"][int(row["abs_ptr"])]
+
         img = torch.from_numpy(img).float()
         if img.max() > 1.0:
             img /= 255.0
 
         if img.ndim == 2:
             img = img.unsqueeze(0)
-        elif img.shape[-1] == 1:
+        elif img.ndim == 3 and img.shape[-1] == 1:
             img = img.permute(2, 0, 1)
 
-        # --- FIX: Handle string labels ---
-        label_raw = row['indication_type']
-        if isinstance(label_raw, str):
-            # Convert string name to integer index using our map
-            label = self.label_map.get(label_raw, 0)
-        else:
-            # If it's already a number, just ensure it's an int
-            label = int(label_raw)
+        if self.transform is not None:
+            img = self.transform(img)
+
+        label_name = _normalize_label(row["indication_type"])
+        label = self.label_map[label_name]  # unknown label will raise KeyError
 
         return img, torch.tensor(label, dtype=torch.long)
 
