@@ -9,21 +9,21 @@ An automated pipeline for textile surface defect classification using deep learn
 
 ```text
 CHE1148_Defect_Detecting/
-├── main.py                     # Master script: Data merging, MD5 hashing, and CNN training
-├── environment.yml             # Conda environment config (Includes DirectML & PyTorch)
+├── main.py                     # Master script
+├── environment.yml             # Conda environment config
 ├── best_textile_baseline.pth   # Output: Saved weights of the best performing model
 ├── README.md                   # Project documentation
 └── data/
     ├── raw/
-    │   └── textile/            # Source Directory (User-provided)
+    │   └── textile/            # Source Directory
     │       ├── train64.h5      # Original training images
     │       ├── train64.csv     # Original training labels
     │       ├── test64.h5       # Original testing images
     │       └── test64.csv      # Original testing labels
-    └── processed/              # Workflow Outputs (Auto-generated)
+    └── processed/              # Workflow Outputs
         ├── full64.h5           # Unified HDF5 dataset for the entire project
         ├── full64.csv          # Unified metadata with absolute physical pointers
-        ├── duplicates_report.csv # Audit of 391 duplicate groups found via MD5
+        ├── duplicates_report.csv # Duplicate groups found
         ├── train_split.csv     # Cleaned training set (Deduplicated)
         ├── val_split.csv       # Cleaned validation set (Stratified from train)
         └── test_split.csv      # Cleaned testing set (Deduplicated)
@@ -43,7 +43,7 @@ conda activate CHE1148_Defect_Detecting
 ## 3. Data Setup
 
 1. Create the folder: `data/raw/textile/`
-2. Place your raw Kaggle `.h5` and `.csv` files inside.
+2. Place your raw Kaggle `.h5` and `.csv` files inside. From: https://www.kaggle.com/datasets/belkhirnacim/textiledefectdetection.
 3. The pipeline will automatically handle the creation of the `data/processed/` directory and its contents.
 
 ## 4. How to Run
@@ -62,22 +62,5 @@ python main.py
 * **TextileBaselineCNN**: A 3-layer Convolutional Neural Network (Conv-BN-ReLU-Pool) designed for surface anomaly extraction.
 * **Automatic Early Stopping**: Monitors validation loss with a patience of 7 epochs and automatically restores the best model weights.
 
-## 6. Label Mapping Reference
-
-The model maps categorical strings to numerical indices for classification:
-
-| Index | Label Name | Description |
-| --- | --- | --- |
-| 0 | `good` | No visible defects |
-| 1 | `hole` | Material puncture |
-| 2 | `metal_contamination` | Foreign metallic objects |
-| 3 | `oil_spot` | Liquid staining |
-| 4 | `thread` | Loose or stray fibers |
-| 5 | `wrinkle` | Surface deformation |
-
-## 7. Output
-
-* **Best Model**: `best_textile_baseline.pth` (Saved in root).
-* **Data Audit**: Check `data/processed/duplicates_report.csv` to review which images were identified as redundant.
 
 ---
