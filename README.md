@@ -9,24 +9,17 @@ An automated pipeline for textile surface defect classification using deep learn
 
 ```text
 CHE1148_Defect_Detecting/
-├── main.py                     # Master script
-├── environment.yml             # Conda environment config
-├── best_textile_baseline.pth   # Output: Saved weights of the best performing model
-├── README.md                   # Project documentation
+├── main.py                     
+├── environment.yml             
+├── README.md                   
 └── data/
     ├── raw/
     │   └── textile/            # Source Directory
-    │       ├── train64.h5      # Original training images
-    │       ├── train64.csv     # Original training labels
-    │       ├── test64.h5       # Original testing images
-    │       └── test64.csv      # Original testing labels
+    │       ├── train64.h5      
+    │       ├── train64.csv     
+    │       ├── test64.h5       
+    │       └── test64.csv      
     └── processed/              # Workflow Outputs
-        ├── full64.h5           # Unified HDF5 dataset for the entire project
-        ├── full64.csv          # Unified metadata with absolute physical pointers
-        ├── duplicates_report.csv # Duplicate groups found
-        ├── train_split.csv     # Cleaned training set (Deduplicated)
-        ├── val_split.csv       # Cleaned validation set (Stratified from train)
-        └── test_split.csv      # Cleaned testing set (Deduplicated)
 
 ```
 
