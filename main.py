@@ -41,19 +41,55 @@ TRAIN_H5, TRAIN_CSV = RAW / "train64.h5", RAW / "train64.csv"
 TEST_H5, TEST_CSV = RAW / "test64.h5", RAW / "test64.csv"
 OUT_H5, OUT_CSV = PROCESSED / "full64.h5", PROCESSED / "full64.csv"
 
-# Device setup
-device = torch.device("cpu")
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
+# Set True to force NVIDIA CUDA. If CUDA is unavailable, raise an actionable error.
+REQUIRE_CUDA = True
+
+
+def _print_torch_runtime() -> None:
+    print(f"[Runtime] torch={torch.__version__}")
+    print(f"[Runtime] torch.version.cuda={torch.version.cuda}")
+    print(f"[Runtime] cuda.is_available={torch.cuda.is_available()}")
+    print(f"[Runtime] cuda.device_count={torch.cuda.device_count()}")
+
+
+def select_device(require_cuda: bool = False):
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        gpu_name = torch.cuda.get_device_name(0)
+        return torch.device("cuda"), f"cuda ({gpu_name})"
+
+    if require_cuda:
+        if torch.version.cuda is None:
+            reason = (
+                "Detected CPU-only PyTorch build. "
+                "Install CUDA-enabled PyTorch in this environment."
+            )
+        else:
+            reason = "CUDA build detected, but no usable CUDA device is visible to PyTorch."
+        raise RuntimeError(
+            "REQUIRE_CUDA=True but CUDA is unavailable.\n"
+            f"Reason: {reason}\n"
+            "Quick fix (conda): conda install pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia"
+        )
+
     try:
         import torch_directml  # type: ignore
 
-        device = torch_directml.device()
+        dml_device = torch_directml.device()
+        return dml_device, "directml (AMD/Intel/NVIDIA)"
     except ImportError:
         pass
+    except Exception as e:
+        print(f"[WARN] DirectML detected but unavailable: {e}")
+
+    if hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps"), "mps (Apple Silicon)"
+
+    return torch.device("cpu"), "cpu"
+
+
+_print_torch_runtime()
+device, device_name = select_device(require_cuda=REQUIRE_CUDA)
+print(f"Using device: {device_name}")
 
 
 def _require_file(path: Path) -> None:
