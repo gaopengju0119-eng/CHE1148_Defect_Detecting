@@ -1,10 +1,14 @@
 ﻿name: CHE1148_Defect_Detecting
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.4
   - numpy
   - pandas
   - h5py
@@ -15,8 +19,5 @@ dependencies:
   - ipykernel
   - pip
   - pip:
-    - torch
-    - torchvision
-    - torch-directml
     - torchinfo
     - captum
