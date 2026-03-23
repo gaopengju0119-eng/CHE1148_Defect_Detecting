@@ -2,7 +2,6 @@
 channels:
   - pytorch
   - nvidia
-  - conda-forge
   - defaults
 dependencies:
   - python=3.10
@@ -16,6 +15,9 @@ dependencies:
   - matplotlib
   - seaborn
   - tqdm
+  - jupyter
+  - jupyterlab
+  - notebook
   - ipykernel
   - pip
   - pip:
