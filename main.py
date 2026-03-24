@@ -17,7 +17,7 @@ import json
 import os
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple, cast
 
 import h5py
 import pandas as pd
@@ -46,10 +46,16 @@ REQUIRE_CUDA = True
 
 
 def _print_torch_runtime() -> None:
+    cuda_version = _torch_cuda_version()
     print(f"[Runtime] torch={torch.__version__}")
-    print(f"[Runtime] torch.version.cuda={torch.version.cuda}")
+    print(f"[Runtime] torch.version.cuda={cuda_version}")
     print(f"[Runtime] cuda.is_available={torch.cuda.is_available()}")
     print(f"[Runtime] cuda.device_count={torch.cuda.device_count()}")
+
+
+def _torch_cuda_version() -> Optional[str]:
+    version_module = getattr(torch, "version", None)
+    return cast(Optional[str], getattr(version_module, "cuda", None))
 
 
 def select_device(require_cuda: bool = False):
@@ -58,7 +64,8 @@ def select_device(require_cuda: bool = False):
         return torch.device("cuda"), f"cuda ({gpu_name})"
 
     if require_cuda:
-        if torch.version.cuda is None:
+        cuda_version = _torch_cuda_version()
+        if cuda_version is None:
             reason = (
                 "Detected CPU-only PyTorch build. "
                 "Install CUDA-enabled PyTorch in this environment."
@@ -351,7 +358,7 @@ def validate_split_labels(csv_path: Path, label_map: Dict[str, int]) -> None:
 # %% [markdown]
 # ## 6. PyTorch Dataset & Model
 
-class TextileDataset(Dataset):
+class TextileDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
     """Read images from full64.h5 using pointers stored in the split CSV."""
 
     def __init__(
@@ -387,6 +394,10 @@ class TextileDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.df)
+
+    def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+        for idx in range(len(self)):
+            yield self[idx]
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         row = self.df.iloc[idx]
