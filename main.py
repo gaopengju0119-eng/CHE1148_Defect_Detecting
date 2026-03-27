@@ -15,11 +15,13 @@ import copy
 import hashlib
 import json
 import os
+import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple, cast
 
 import h5py
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -44,6 +46,7 @@ OUT_H5, OUT_CSV = PROCESSED / "full64.h5", PROCESSED / "full64.csv"
 # Keep False by default for broader local compatibility.
 # Set to True only when you explicitly require NVIDIA CUDA.
 REQUIRE_CUDA = False
+GLOBAL_SEED = 42
 
 
 def _print_torch_runtime() -> None:
@@ -95,8 +98,33 @@ def select_device(require_cuda: bool = False):
     return torch.device("cpu"), "cpu"
 
 
+def set_seed(seed: int = GLOBAL_SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = (GLOBAL_SEED + worker_id) % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def _build_dataloader_generator(seed: int = GLOBAL_SEED) -> torch.Generator:
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    return gen
+
+
 _print_torch_runtime()
 device, device_name = select_device(require_cuda=REQUIRE_CUDA)
+set_seed(GLOBAL_SEED)
 print(f"Using device: {device_name}")
 
 
@@ -539,8 +567,20 @@ if __name__ == "__main__":
     # Loaders
     train_ds = TextileDataset(PROCESSED / "train_split.csv", OUT_H5, label_map=label_map)
     val_ds = TextileDataset(PROCESSED / "val_split.csv", OUT_H5, label_map=label_map)
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch"], shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg["batch"])
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg["batch"],
+        shuffle=True,
+        worker_init_fn=_seed_worker,
+        generator=_build_dataloader_generator(GLOBAL_SEED),
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg["batch"],
+        shuffle=False,
+        worker_init_fn=_seed_worker,
+        generator=_build_dataloader_generator(GLOBAL_SEED),
+    )
 
     # Model & training setup
     model = TextileBaselineCNN(num_classes=len(label_map)).to(device)
