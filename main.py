@@ -41,8 +41,9 @@ TRAIN_H5, TRAIN_CSV = RAW / "train64.h5", RAW / "train64.csv"
 TEST_H5, TEST_CSV = RAW / "test64.h5", RAW / "test64.csv"
 OUT_H5, OUT_CSV = PROCESSED / "full64.h5", PROCESSED / "full64.csv"
 
-# Set True to force NVIDIA CUDA. If CUDA is unavailable, raise an actionable error.
-REQUIRE_CUDA = True
+# Keep False by default for broader local compatibility.
+# Set to True only when you explicitly require NVIDIA CUDA.
+REQUIRE_CUDA = False
 
 
 def _print_torch_runtime() -> None:
