@@ -1,77 +1,118 @@
-````md
-# CHE1148 Textile Defect Detection (Textile → SEM/TEM Proxy)
+# Defect Detecting Learned from Textile Image and Using for TEM Images
 
-This repo contains our CHE1148 team project on **surface defect detection** using a textile defect dataset as a proxy for **SEM/TEM-like** surface anomalies.
+Target: Train models for detecting defects within TEM images (nanostructure of materials/catalysts). However, because of lacking high quality, well established dataset, we chose to use the Textile Defect Detection (TDD) dataset (public dataset by the MVTec company) as a structural prox to train model. And then checked their performance using real TEM images.
 
----
+The main implementation is in `main.ipynb`. The current notebook is centered on ViT, but the model factory is designed so the active model can be changed to other architectures, including the CNN baseline, ResNet-18, and EfficientNet/
 
 ## Repository Layout
 
 ```text
 CHE1148_Defect_Detecting/
-├─ main.py
-├─ environment.yml
-├─ README.md
-├─ .gitignore
-└─ data/                      # local only (ignored by git)
-   ├─ raw/
-   │  └─ textile/             # put downloaded .h5 files here
-   └─ processed/              # generated folders/images go here
-````
+|-- main.ipynb
+|-- environment.yml
+|-- README.md
+|-- data/
+|   |-- raw/
+|   |   |-- textile/
+|   |   |   |-- train64.h5
+|   |   |   |-- train64.csv
+|   |   |   |-- test64.h5
+|   |   |   |-- test64.csv
+|   |   |-- TEM/
+|   |       |-- TEM images for reference
+|   |-- processed/
+|       |-- full64.h5
+|       |-- full64.csv
+|       |-- train_split.csv
+|       |-- val_split.csv
+|       |-- test_split.csv
+|       |-- label_map.json
+|       |-- output/
+|           |-- model checkpoints, histories, metrics, and figures
+```
 
-> **Important:** `data/` is **not** pushed to GitHub. Each teammate stores the dataset locally.
+## Notebook Overview
 
----
+`main.ipynb` is organized as a full experiment pipeline:
 
-## Setup (Conda)
+1. Imports, runtime path setup, and device selection.
+2. Global training and evaluation configuration.
+3. Dataset merge, duplicate analysis, and train/validation/test split generation.
+4. Label-map construction and validation.
+5. DataLoader utilities and model-specific image transforms.
+6. Dataset class for loading textile images from H5 files.
+7. Model architecture factory (ViT, CNN baseline, ResNet, EfficientNet).
+8. Training or checkpoint-loading mode.
+9. Multi-scenario (conducted 38 scenarios) training and model checkpoint saving.
+10. Test evaluation and confusion-matrix visualization.
+11. IG (Integrated Gradients) utilities.
+12. Trained-vs-untrained IG interpretability comparison.
+13. TEM image inference and TEM result visualization.
+14. TEM IG interpretation.
 
-### 1) Create the environment
+## Environment Setup
 
-From the project root:
+Create the Conda environment from the project root:
 
 ```bash
 conda env create -f environment.yml
 conda activate CHE1148_Defect_Detecting
 ```
 
-### 2) Install basic dependencies (if needed)
+## Running the Notebook
 
-These are used for H5 inspection / preprocessing:
+The notebook supports two main execution modes:
 
-```bash
-conda install -y numpy h5py pillow matplotlib scikit-learn tqdm
+```python
+USE_EXISTING_CHECKPOINT = True
 ```
 
----
+This loads an existing checkpoint and runs evaluation/inference.
 
-## Dataset Placement
-
-Put Kaggle `.h5` file(s) here:
-
-```text
-data/raw/textile/
-├─ matchingtDATASET_test_32.h5
-└─ matchingtDATASET_train_32.h5   (if available)
+```python
+USE_EXISTING_CHECKPOINT = False
 ```
 
----
+This trains the active model on the configured scenario and saves a new checkpoint/history file under `data/processed/output/`.
 
-## Quick Check (H5 Readability)
+When checkpoint mode is enabled, make sure `EXISTING_CHECKPOINT`, `EXISTING_SCENARIO_NAME`, and `EXISTING_SCENARIO_CONFIG` match the model and class setup used during training.
 
-Run a small H5 inspection script (in `main.py`) to confirm:
+## Model Selection
 
-* the file opens without error
-* top-level keys (classes) are readable
-* a sample dataset has a valid shape (e.g., `(N, 32, 32, 1)`)
+The model is selected in the `# --- Model Architecture Factory ---` cell:
 
-If this works, the dataset is ready for preprocessing and training.
+```python
+ACTIVE_MODEL_NAME = "vit"
+```
 
----
+The model registry currently includes:
 
-## Git Workflow Notes
+```python
+MODEL_SPECS = {
+    "vit": ...,
+    "basic_cnn": ...,
+    "resnet18": ...,
+    "efficientnet_b2": ...,
+}
+```
 
-* **Do not commit** `data/` (ignored by `.gitignore`).
-* Commit only code/config files (e.g., `main.py`, `environment.yml`, `README.md`).
-* Use branches + PRs for collaboration when possible.
+Model branch references:
 
----
+- ViT: available in Matt's branch and the main branch.
+- CNN baseline: available in Pengju's branch.
+- ResNet-18: available in Pengju's branch.
+- EfficientNet: available in Sebastian's branch.
+
+## Training Scenarios
+
+Training scenarios are configured in the common data setup cell:
+
+```python
+scenarios = [
+    {
+        "train_factor": 0,
+        "defect_ratio": 1,
+        "defect_classes": ["good", "cut", "color", "metal_contamination", "hole", "thread"],
+    }
+]
+```
